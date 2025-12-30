@@ -1,104 +1,102 @@
 import streamlit as st
 import pandas as pd
-from yahooquery import Ticker
-from datetime import datetime, timedelta
-import urllib.parse
+import requests
+from datetime import datetime
 
-# 1. Sivun asetukset
+# 1. ASETUKSET
 st.set_page_config(page_title="Earnings Schedule", page_icon="📅")
 
-# --- APUFUNKTIOT ---
+# --- TÄRKEÄÄ: LIITÄ API-AVAIMESI TÄHÄN ---
+# Korvaa teksti 'SINUN_AVAIN_TÄHÄN' sillä koodilla jonka sait Alpha Vantagelta.
+# Esimerkiksi: API_KEY = "A1B2C3D4E5"
+API_KEY = "WL4169NK8EZMS49Z"
 
-def create_google_calendar_url(ticker, event_date):
+def create_google_calendar_url(ticker, event_date, event_type):
     """Luo Google Kalenteri -linkin"""
-    # Varmistetaan aikamuoto
-    if isinstance(event_date, (pd.Timestamp, datetime)):
-        start_dt = event_date.replace(hour=9, minute=0, second=0)
-    else:
-        # Jos data on pelkkä päivämäärä ilman kelloa
-        start_dt = datetime.combine(event_date, datetime.min.time()).replace(hour=9)
-
-    end_dt = start_dt + timedelta(hours=1)
-    fmt = "%Y%m%dT%H%M%S"
-    dates_str = f"{start_dt.strftime(fmt)}/{end_dt.strftime(fmt)}"
+    date_str = event_date.replace("-", "")
+    # Oletetaan tapahtuman kestävän aamulla 09-10
+    start_time = f"{date_str}T090000"
+    end_time = f"{date_str}T100000"
     
-    params = {
-        "action": "TEMPLATE",
-        "text": f"Earnings Call: {ticker}",
-        "dates": dates_str,
-        "details": f"Check investor relations page for {ticker}.\nData source: Yahoo Finance via Yahooquery.",
-        "location": "Online / Helsinki"
-    }
-    return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+    details = f"Official earnings release for {ticker}. Data source: Alpha Vantage."
+    text = f"{ticker} - {event_type}"
+    
+    base = "https://calendar.google.com/calendar/render?action=TEMPLATE"
+    return f"{base}&text={text}&dates={start_time}/{end_time}&details={details}"
 
 @st.cache_data(ttl=3600)
-def get_earnings_data(symbol):
-    """Hakee tiedot yahooquery-kirjastolla"""
+def get_alpha_vantage_data(symbol):
+    """Hakee datan Alpha Vantagesta"""
+    if API_KEY == "SINUN_AVAIN_TÄHÄN":
+        return "NO_KEY"
+        
+    url = f"https://www.alphavantage.co/query?function=EARNINGS&symbol={symbol}&apikey={API_KEY}"
+    
     try:
-        # Yahooquery on usein luotettavampi pilvessä
-        t = Ticker(symbol)
+        r = requests.get(url)
+        data = r.json()
         
-        # Haetaan kalenteritiedot
-        # calendar_events palauttaa yleensä DataFramen tai sanakirjan
-        cal = t.calendar_events
-        
-        if isinstance(cal, dict):
-            # Joskus palauttaa virheen sanakirjana
-            if symbol in cal and isinstance(cal[symbol], str):
-                return None
-            # Joskus data on suoraan avaimen takana
-            df = cal.get(symbol)
+        # Alpha Vantage palauttaa tyhjän {} tai virheen jos symboli on väärä
+        if "quarterlyEarnings" in data:
+            return data["quarterlyEarnings"]
+        elif "Note" in data:
+            # Alpha Vantagen ilmaisversiossa on rajoitus (n. 25 hakua päivässä)
+            return "LIMIT"
         else:
-            df = cal
-
-        if isinstance(df, pd.DataFrame) and not df.empty:
-             return df
+            return None
+    except:
         return None
 
-    except Exception as e:
-        st.error(f"Tekninen virhe haussa: {e}")
-        return None
-
-# --- SIVUN KÄYTTÖLIITTYMÄ ---
+# --- UI ---
 
 st.title("📅 Earnings Schedule")
-st.caption("Powered by YahooQuery")
+st.caption("Powered by Alpha Vantage")
 
-col1, col2 = st.columns([2, 1])
+if API_KEY == "SINUN_AVAIN_TÄHÄN":
+    st.error("⚠️ API-avain puuttuu!")
+    st.write("Avaa `app.py` tiedosto ja liitä Alpha Vantage -avaimesi riville 12.")
+else:
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        # Huom: Alpha Vantagessa USA-osakkeet ilman päätettä (NVDA)
+        # Eurooppalaiset usein .HEL, .TRT (eikä .HE). Kokeile eri muotoja.
+        ticker_input = st.text_input("Ticker symbol (e.g. IBM, NVDA)", value="").upper()
 
-with col1:
-    ticker_input = st.text_input("Ticker symbol (e.g. NVDA, KESKOB.HE)", value="").upper()
-
-if ticker_input:
-    with st.spinner(f"Fetching data for {ticker_input}..."):
-        df = get_earnings_data(ticker_input)
-        
-        if df is not None:
-            # Tarkistetaan löytyykö Earnings Date -saraketta
-            if 'earnings_date' in df.columns:
-                st.success(f"Events found for: {ticker_input}")
+    if ticker_input:
+        with st.spinner(f"Checking Alpha Vantage for {ticker_input}..."):
+            earnings_list = get_alpha_vantage_data(ticker_input)
+            
+            if earnings_list == "NO_KEY":
+                st.error("Muista tallentaa API-avaimesi koodiin!")
+            elif earnings_list == "LIMIT":
+                st.warning("Daily API limit reached. Alpha Vantage free tier allows ~25 requests/day.")
+            elif earnings_list:
+                st.success(f"Found earnings data for {ticker_input}")
                 
-                # Järjestetään päivämäärät
-                dates = df['earnings_date'].sort_values().values
+                # Otetaan 4 seuraavaa/viimeisintä havaintoa
+                upcoming = earnings_list[:4]
                 
-                for date_val in dates:
-                    # Muutetaan pandas timestamp oikeaan muotoon
-                    d_obj = pd.to_datetime(date_val)
+                for item in upcoming:
+                    rep_date = item.get('fiscalDateEnding', 'N/A')
+                    report_date = item.get('reportedDate', 'N/A')
                     
-                    # Ohitetaan menneet tapahtumat (valinnainen, nyt näytetään kaikki tulevat)
-                    if d_obj > datetime.now() - timedelta(days=1):
-                        display_date = d_obj.strftime("%Y-%m-%d %H:%M")
-                        
-                        with st.container(border=True):
-                            c1, c2 = st.columns([3, 2])
-                            with c1:
-                                st.subheader(display_date)
-                                st.caption("Earnings Call / Release")
-                            with c2:
-                                url = create_google_calendar_url(ticker_input, d_obj)
-                                st.link_button("📅 Add to Calendar", url)
+                    # Jos reportedDate on tiedossa, käytetään sitä, muuten arvio
+                    display_date = report_date if report_date != 'None' else f"~{rep_date} (Est)"
+                    
+                    # Ohitetaan vanhat (jos haluat vain tulevat)
+                    # Tässä näytetään viimeisimmät raportoidut selkeyden vuoksi
+                    
+                    with st.container(border=True):
+                        c1, c2 = st.columns([3, 2])
+                        with c1:
+                            st.subheader(display_date)
+                            st.text(f"Fiscal End: {rep_date}")
+                        with c2:
+                            if report_date != 'None':
+                                url = create_google_calendar_url(ticker_input, report_date, "Earnings Report")
+                                st.link_button("📅 Add to Cal", url)
+                            else:
+                                st.write("(Date not confirmed)")
             else:
-                 st.warning("Data found, but no earnings dates listed.")
-        else:
-            st.warning("No data found. Yahoo might be blocking requests or ticker is wrong.")
-            st.info("Try adding .HE for Finnish stocks (e.g. FORTUM.HE)")
+                st.warning("No data found. Check ticker symbol.")
+                st.info("Alpha Vantage uses different suffixes. Try 'IBM' or 'DAI.DEX' for Germany.")
